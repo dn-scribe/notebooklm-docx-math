@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NotebookLM Math to Word</title>
+<meta name="description" content="Turn raw LaTeX in a .docx into real, editable Word equations. Runs entirely in your browser.">
+<style>
+  :root { --bg:#fafaf7; --fg:#1d1d1b; --muted:#6b6b66; --card:#fff; --line:#e3e2dc; --accent:#1a5fb4; --ok:#1b7a3e; --err:#b3261e; }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bg:#16161a; --fg:#ececea; --muted:#9a9a94; --card:#1f1f24; --line:#33333a; --accent:#78aeed; --ok:#57c785; --err:#f2877f; } }
+  :root[data-theme="dark"] { --bg:#16161a; --fg:#ececea; --muted:#9a9a94; --card:#1f1f24; --line:#33333a; --accent:#78aeed; --ok:#57c785; --err:#f2877f; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:16px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif; }
+  main { max-width:720px; margin:0 auto; padding:40px 16px 64px; }
+  h1 { font-size:1.7rem; margin:0 0 .3rem; letter-spacing:-.01em; }
+  p.lead { color:var(--muted); margin:0 0 1.6rem; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:20px; }
+  #drop { border:2px dashed var(--line); border-radius:10px; padding:36px 16px; text-align:center; cursor:pointer; transition:border-color .15s; }
+  #drop.over, #drop:hover, #drop:focus-visible { border-color:var(--accent); outline:none; }
+  #drop b { color:var(--accent); }
+  .row { display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin-top:14px; }
+  label.chk { display:flex; gap:8px; align-items:center; color:var(--muted); font-size:.92rem; }
+  button { font:inherit; background:var(--accent); color:#fff; border:0; border-radius:8px; padding:9px 16px; cursor:pointer; }
+  button:disabled { opacity:.45; cursor:default; }
+  #status { margin-top:14px; min-height:1.5em; }
+  .ok { color:var(--ok); } .err { color:var(--err); }
+  .demo { display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-top:28px; }
+  .demo .card { padding:14px; font-size:.9rem; }
+  .demo h2 { font-size:.75rem; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); margin:0 0 8px; }
+  code { font-family:ui-monospace,Menlo,monospace; font-size:.88em; word-break:break-word; }
+  math { font-size:1.1em; }
+  h3 { margin:2rem 0 .4rem; font-size:1.05rem; }
+  ul { padding-left:1.2rem; color:var(--muted); } a { color:var(--accent); }
+  @media (max-width:560px) { .demo { grid-template-columns:1fr; } }
+</style>
+</head>
+<body>
+<main>
+  <h1>NotebookLM Math to Word</h1>
+  <p class="lead">Google Docs / NotebookLM exports leave equations as raw text like <code>$\pm 0.1\text{ mm}$</code>. Drop the .docx here to get one where they are real Word equations.</p>
+
+  <div class="card">
+    <div id="drop" tabindex="0" role="button" aria-label="Choose a .docx file">
+      <div><b>Choose a .docx</b> or drop it here</div>
+      <div id="fname" style="color:var(--muted);font-size:.9rem;margin-top:4px">Single page, no server: conversion runs in this tab, nothing is uploaded.</div>
+    </div>
+    <input id="file" type="file" accept=".docx" hidden>
+    <div class="row">
+      <button id="go" disabled>Convert</button>
+      <label class="chk"><input id="fix" type="checkbox" checked> Repair Markdown damage (<code>\\text</code>, <code>\_</code>)</label>
+    </div>
+    <div id="status" role="status"></div>
+  </div>
+
+  <div class="demo">
+    <div class="card"><h2>Before (text)</h2><code>$$\text{Correction} = X \times (\text{CTE}_{\text{Part}} - \text{CTE}_{\text{Tool}})$$</code></div>
+    <div class="card"><h2>After (equation)</h2><div id="demoMath"></div></div>
+  </div>
+
+  <h3>What it handles</h3>
+  <ul>
+    <li><code>$…$</code>, <code>$$…$$</code>, <code>\(…\)</code>, <code>\[…\]</code> in body, tables, headers, footers, footnotes.</li>
+    <li>Keeps run formatting around the math. Dollar amounts such as <code>$0.35 to $0.60</code> are left alone.</li>
+    <li>Equations it cannot parse stay as the original text and are counted in the result.</li>
+  </ul>
+  <p style="color:var(--muted);font-size:.9rem">Also available as a Claude Code skill and a Python script; see the <a href="https://github.com/dn-scribe/notebooklm-docx-math">repository README</a>.</p>
+</main>
+
+<script>/*@@jszip@@*/</script>
+<script>/*@@temml@@*/</script>
+<script>/*@@converter@@*/</script>
+<script>
+(function () {
+  const $ = (id) => document.getElementById(id);
+  let file = null;
+  const drop = $("drop"), input = $("file"), go = $("go"), status = $("status");
+
+  try {
+    $("demoMath").innerHTML = temml.renderToString(
+      "\\text{Correction} = X \\times (\\text{CTE}_{\\text{Part}} - \\text{CTE}_{\\text{Tool}})", { displayMode: true });
+  } catch (e) { $("demoMath").textContent = "(preview unavailable)"; }
+
+  function pick(f) {
+    if (!f) return;
+    if (!/\.docx$/i.test(f.name)) { status.innerHTML = '<span class="err">Please choose a .docx file.</span>'; return; }
+    file = f; go.disabled = false;
+    $("fname").textContent = f.name + " (" + Math.round(f.size / 1024) + " KB)";
+    status.textContent = "";
+  }
+  drop.addEventListener("click", () => input.click());
+  drop.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); input.click(); } });
+  input.addEventListener("change", () => pick(input.files[0]));
+  ["dragenter", "dragover"].forEach((t) => drop.addEventListener(t, (e) => { e.preventDefault(); drop.classList.add("over"); }));
+  ["dragleave", "drop"].forEach((t) => drop.addEventListener(t, (e) => { e.preventDefault(); drop.classList.remove("over"); }));
+  drop.addEventListener("drop", (e) => pick(e.dataTransfer.files[0]));
+
+  go.addEventListener("click", async () => {
+    go.disabled = true; status.textContent = "Converting…";
+    try {
+      const buf = await file.arrayBuffer();
+      const r = await DocxMath.convert(buf, { JSZip, temml, DOMParser, XMLSerializer }, { fix: $("fix").checked });
+      const name = file.name.replace(/\.docx$/i, "") + "_math.docx";
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(r.blob); a.download = name; document.body.appendChild(a); a.click(); a.remove();
+      status.innerHTML = '<span class="ok">' + r.done + " equations converted</span>" +
+        (r.skipped ? ', <span class="err">' + r.skipped + " left as text</span>" : "") + ". Saved " + name + ".";
+    } catch (e) {
+      status.innerHTML = '<span class="err">Failed: ' + String(e.message || e).replace(/</g, "&lt;") + "</span>";
+    }
+    go.disabled = false;
+  });
+})();
+</script>
+</body>
+</html>
