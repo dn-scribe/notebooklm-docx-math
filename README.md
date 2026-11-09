@@ -7,14 +7,14 @@ Word equations. Three ways to use it:
 | Way | Needs | Where |
 |---|---|---|
 | Web page: one HTML file, JS only, no backend | a browser | `site/index.html` → GitHub Pages |
-| Python script | python3, lxml, pandoc | `skill/notebooklm-docx-math/scripts/docx_latex_to_word.py` |
-| Claude Code skill | the above | `skill/notebooklm-docx-math/` |
+| Python script | python3, lxml, pandoc | `scripts/docx_latex_to_word.py` |
+| Claude skill (points users to the web page) | nothing | `skill/notebooklm-docx-math/` |
 
 ## Script
 
 ```bash
 pip install lxml && brew install pandoc    # or apt install pandoc
-python3 skill/notebooklm-docx-math/scripts/docx_latex_to_word.py in.docx out.docx
+python3 scripts/docx_latex_to_word.py in.docx out.docx
 ```
 
 ## Skill
@@ -23,7 +23,7 @@ python3 skill/notebooklm-docx-math/scripts/docx_latex_to_word.py in.docx out.doc
 cp -r skill/notebooklm-docx-math ~/.claude/skills/
 ```
 
-Then ask Claude: "make this NotebookLM docx readable".
+For claude.ai upload the folder as a zip (Settings → Capabilities → Skills). Then ask Claude: "make this NotebookLM docx readable".
 
 ## Web page
 
