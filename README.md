@@ -32,6 +32,9 @@ converter are inlined; no CDN, works offline). After editing `src/` or
 `vendor/`, run `python3 build.py` and commit the result. The workflow in
 `.github/workflows/pages.yml` publishes `site/` to GitHub Pages on push to `main`.
 
+Also: `^\circ` becomes `°`, and runs of comma-separated lines (NotebookLM's
+table export) become real Word tables (`--no-tables` / checkbox to disable).
+
 ## How it works
 
 Both engines find math spans per paragraph (across split Word runs), repair

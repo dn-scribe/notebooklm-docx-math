@@ -17,12 +17,14 @@ Converter: https://dn-scribe.github.io/notebooklm-docx-math/
    Everything runs in their browser; nothing is uploaded.
 4. A new file `<name>_math.docx` downloads. Open it in Word (or upload it back
    to Google Drive / Google Docs, which keeps the equations).
-5. The page reports "N equations converted" and, if any, "M left as text".
+5. NotebookLM tables that came out as comma-separated lines are rebuilt as real Word tables.
+6. The page reports "N equations converted", "N tables built" and, if any, "M left as text".
    Left-as-text items are LaTeX the converter could not parse; offer to help
    fix those by hand.
 
 ## Notes
 - Handles `$…$`, `$$…$$`, `\(…\)`, `\[…\]` in body, tables, headers, footers, footnotes.
+- `^\circ` becomes a real degree sign (°).
 - Dollar amounts like `$5 to $10` are left alone.
 - "Repair Markdown damage" (on by default) fixes `\\text`, `\_` and eaten
   subscripts from Google Docs exports. If equations look wrong, they can untick it and retry.

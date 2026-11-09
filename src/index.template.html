@@ -48,6 +48,7 @@
     <div class="row">
       <button id="go" disabled>Convert</button>
       <label class="chk"><input id="fix" type="checkbox" checked> Repair Markdown damage (<code>\\text</code>, <code>\_</code>)</label>
+      <label class="chk"><input id="tables" type="checkbox" checked> Turn comma-separated text into tables</label>
     </div>
     <div id="status" role="status"></div>
   </div>
@@ -98,11 +99,12 @@
     go.disabled = true; status.textContent = "Converting…";
     try {
       const buf = await file.arrayBuffer();
-      const r = await DocxMath.convert(buf, { JSZip, temml, DOMParser, XMLSerializer }, { fix: $("fix").checked });
+      const r = await DocxMath.convert(buf, { JSZip, temml, DOMParser, XMLSerializer }, { fix: $("fix").checked, tables: $("tables").checked });
       const name = file.name.replace(/\.docx$/i, "") + "_math.docx";
       const a = document.createElement("a");
       a.href = URL.createObjectURL(r.blob); a.download = name; document.body.appendChild(a); a.click(); a.remove();
       status.innerHTML = '<span class="ok">' + r.done + " equations converted</span>" +
+        (r.tables ? ", " + r.tables + " table" + (r.tables > 1 ? "s" : "") + " built" : "") +
         (r.skipped ? ', <span class="err">' + r.skipped + " left as text</span>" : "") + ". Saved " + name + ".";
     } catch (e) {
       status.innerHTML = '<span class="err">Failed: ' + String(e.message || e).replace(/</g, "&lt;") + "</span>";

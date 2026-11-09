@@ -48,6 +48,7 @@
     <div class="row">
       <button id="go" disabled>Convert</button>
       <label class="chk"><input id="fix" type="checkbox" checked> Repair Markdown damage (<code>\\text</code>, <code>\_</code>)</label>
+      <label class="chk"><input id="tables" type="checkbox" checked> Turn comma-separated text into tables</label>
     </div>
     <div id="status" role="status"></div>
   </div>
@@ -96,6 +97,11 @@ https://github.com/nodeca/pako/blob/main/LICENSE
 
   const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
+  /* ^\circ is the degree sign; \circ alone renders as the small-circle operator. */
+  function normalizeTex(tex) {
+    return tex.replace(/\^\s*\{\s*\\circ\s*\}|\^\s*\\circ(?![A-Za-z])/g, "\u00B0");
+  }
+
   /* Undo Markdown mangling typical of Google-Docs exports of LLM output. */
   function fixMarkdownDamage(tex) {
     tex = tex.replace(/\\\\(?=[A-Za-z%&#])/g, "\\");
@@ -126,7 +132,10 @@ https://github.com/nodeca/pako/blob/main/LICENSE
       case "mn": return run(el.textContent, "");
       case "mo": return run(el.textContent, "");
       case "mtext": return run(el.textContent, "<m:nor/>");
-      case "mspace": return run(" ", "");
+      case "mspace": {
+        const w = parseFloat(el.getAttribute("width") || "0");
+        return w >= 0.9 ? run("\u00A0", "") : "";
+      }
       case "mfrac": return wrap("f", wrap("num", c(0)) + wrap("den", c(1)));
       case "msqrt": return wrap("rad", '<m:radPr><m:degHide m:val="1"/></m:radPr><m:deg/>' + wrap("e", seq(el)));
       case "mroot": return wrap("rad", wrap("deg", c(1)) + wrap("e", c(0)));
@@ -178,8 +187,110 @@ https://github.com/nodeca/pako/blob/main/LICENSE
     return r;
   }
 
+  /* ---------- CSV-as-text paragraphs -> real Word tables ---------- */
+  function splitCsv(line) {
+    const cells = []; let cur = "", q = false, math = false, started = false;
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i];
+      if (q) {
+        if (ch === '"') { if (line[i + 1] === '"') { cur += '"'; i++; } else q = false; }
+        else cur += ch;
+      } else if (ch === '"' && !started) { q = true; started = true; }
+      else if (ch === "$") { math = !math; cur += ch; started = true; }
+      else if (ch === "," && !math) { cells.push(cur.trim()); cur = ""; started = false; }
+      else { cur += ch; if (ch.trim()) started = true; }
+    }
+    if (q || math) return null;
+    cells.push(cur.trim());
+    return cells;
+  }
+
+  function csvCandidate(p) {
+    const ch = kids(p).filter((x) => x.localName !== "pPr");
+    if (!ch.length || !ch.every((x) => isTextRun(x))) return null;
+    const ppr = kids(p).find((x) => x.localName === "pPr");
+    if (ppr) {
+      const st = kids(ppr).find((x) => x.localName === "pStyle");
+      if (kids(ppr).some((x) => x.localName === "numPr")) return null;
+      if (st && /^(Heading|Title|ListParagraph)/i.test(st.getAttributeNS(W, "val") || "")) return null;
+    }
+    const cells = splitCsv(ch.map(runText).join(""));
+    return cells && cells.length >= 2 ? { p, cells, run: ch[0] } : null;
+  }
+
+  function buildTable(doc, rows) {
+    const el = (n, attrs = {}) => {
+      const e = doc.createElementNS(W, "w:" + n);
+      for (const [k, v] of Object.entries(attrs)) e.setAttributeNS(W, "w:" + k, v);
+      return e;
+    };
+    const tbl = el("tbl"), pr = el("tblPr");
+    pr.appendChild(el("tblW", { w: "5000", type: "pct" }));
+    const b = el("tblBorders");
+    for (const side of ["top", "left", "bottom", "right", "insideH", "insideV"])
+      b.appendChild(el(side, { val: "single", sz: "4", space: "0", color: "999999" }));
+    pr.appendChild(b);
+    const cm = el("tblCellMar");
+    for (const side of ["left", "right"]) cm.appendChild(el(side, { w: "80", type: "dxa" }));
+    pr.appendChild(cm);
+    tbl.appendChild(pr);
+    const grid = el("tblGrid");
+    for (let i = 0; i < rows[0].cells.length; i++) grid.appendChild(el("gridCol"));
+    tbl.appendChild(grid);
+    rows.forEach((row, ri) => {
+      const tr = el("tr");
+      if (ri === 0) { const trp = el("trPr"); trp.appendChild(el("tblHeader")); tr.appendChild(trp); }
+      for (const text of row.cells) {
+        const tc = el("tc"), p = el("p"), r = makeRun(doc, row.run, text);
+        if (ri === 0) {
+          let rpr = kids(r).find((x) => x.localName === "rPr");
+          if (!rpr) { rpr = el("rPr"); r.insertBefore(rpr, r.firstChild); }
+          rpr.appendChild(el("b"));
+        }
+        p.appendChild(r); tc.appendChild(p); tr.appendChild(tc);
+      }
+      tbl.appendChild(tr);
+    });
+    return tbl;
+  }
+
+  function convertTables(doc, stats) {
+    const parents = new Set();
+    for (const p of Array.from(doc.getElementsByTagNameNS(W, "p"))) parents.add(p.parentNode);
+    for (const parent of parents) {
+      let group = [];
+      // intro sentences with the same comma count as the table are not header rows
+      const prose = (g) => g.cells.some((c) => c.length > 80) || /[:.]$/.test(g.cells[g.cells.length - 1]);
+      const flush = (next) => {
+        while (group.length && prose(group[0])) group.shift();
+        const n = group.length ? group[0].cells.length : 0;
+        const ok = group.length >= 2 &&
+          (n >= 3 || (group.length >= 3 && group.every((g) => g.cells.every((c) => c.length < 60))));
+        if (ok) {
+          const t = buildTable(doc, group);
+          parent.insertBefore(t, group[0].p);
+          // Word needs a paragraph after a table that ends a cell/body
+          for (const g of group) parent.removeChild(g.p);
+          stats.tables++;
+        }
+        group = [];
+        if (next) group.push(next);
+      };
+      for (const ch of kids(parent)) {
+        if (ch.namespaceURI === W && ch.localName === "p") {
+          const c = csvCandidate(ch);
+          if (c && (!group.length || group[0].cells.length === c.cells.length)) group.push(c);
+          else flush(c);
+        } else flush(null);
+      }
+      flush(null);
+    }
+  }
+
   function processPart(xml, deps, opts, stats) {
     const doc = new deps.DOMParser().parseFromString(xml, "application/xml");
+    const tablesBefore = stats.tables;
+    if (opts.tables) convertTables(doc, stats);
     const paras = Array.from(doc.getElementsByTagNameNS(W, "p"));
     const jobs = [];
     for (const p of paras) {
@@ -204,7 +315,7 @@ https://github.com/nodeca/pako/blob/main/LICENSE
         const gr = m.groups;
         const tex0 = gr.d1 ?? gr.d2 ?? gr.i2 ?? gr.i1;
         const display = gr.d1 !== undefined || gr.d2 !== undefined;
-        const omml = latexToOmml(opts.fix ? fixMarkdownDamage(tex0) : tex0, display, deps);
+        const omml = latexToOmml(normalizeTex(opts.fix ? fixMarkdownDamage(tex0) : tex0), display, deps);
         if (m.index > last) out.push(makeRun(doc, owner[last], text.slice(last, m.index)));
         if (omml === null) {
           out.push(makeRun(doc, owner[m.index], m[0])); stats.skipped++;
@@ -222,14 +333,14 @@ https://github.com/nodeca/pako/blob/main/LICENSE
       for (const el of out) p.insertBefore(el, anchor);
       for (const r of g) p.removeChild(r);
     }
-    return jobs.length ? new deps.XMLSerializer().serializeToString(doc) : null;
+    return jobs.length || stats.tables > tablesBefore ? new deps.XMLSerializer().serializeToString(doc) : null;
   }
 
   /* deps: { JSZip, temml, DOMParser, XMLSerializer }; input: ArrayBuffer/Uint8Array */
   async function convert(input, deps, opts = {}) {
-    opts = { fix: true, ...opts };
+    opts = { fix: true, tables: true, ...opts };
     const zip = await deps.JSZip.loadAsync(input);
-    const stats = { done: 0, skipped: 0 };
+    const stats = { done: 0, skipped: 0, tables: 0 };
     for (const name of Object.keys(zip.files)) {
       if (!PART_RE.test(name)) continue;
       const out = processPart(await zip.file(name).async("string"), deps, opts, stats);
@@ -243,7 +354,7 @@ https://github.com/nodeca/pako/blob/main/LICENSE
     return { blob, ...stats };
   }
 
-  return { convert, fixMarkdownDamage, latexToOmml };
+  return { convert, fixMarkdownDamage, normalizeTex, splitCsv, latexToOmml };
 });
 </script>
 <script>
@@ -275,11 +386,12 @@ https://github.com/nodeca/pako/blob/main/LICENSE
     go.disabled = true; status.textContent = "Converting…";
     try {
       const buf = await file.arrayBuffer();
-      const r = await DocxMath.convert(buf, { JSZip, temml, DOMParser, XMLSerializer }, { fix: $("fix").checked });
+      const r = await DocxMath.convert(buf, { JSZip, temml, DOMParser, XMLSerializer }, { fix: $("fix").checked, tables: $("tables").checked });
       const name = file.name.replace(/\.docx$/i, "") + "_math.docx";
       const a = document.createElement("a");
       a.href = URL.createObjectURL(r.blob); a.download = name; document.body.appendChild(a); a.click(); a.remove();
       status.innerHTML = '<span class="ok">' + r.done + " equations converted</span>" +
+        (r.tables ? ", " + r.tables + " table" + (r.tables > 1 ? "s" : "") + " built" : "") +
         (r.skipped ? ', <span class="err">' + r.skipped + " left as text</span>" : "") + ". Saved " + name + ".";
     } catch (e) {
       status.innerHTML = '<span class="err">Failed: ' + String(e.message || e).replace(/</g, "&lt;") + "</span>";
