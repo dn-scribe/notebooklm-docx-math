@@ -29,6 +29,9 @@
   .demo h2 { font-size:.75rem; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); margin:0 0 8px; }
   code { font-family:ui-monospace,Menlo,monospace; font-size:.88em; word-break:break-word; }
   math { font-size:1.1em; }
+  #rt { border-collapse:collapse; font-size:.82rem; margin-top:10px; width:100%; }
+  #rt td { border-top:1px solid var(--line); padding:4px 6px; vertical-align:top; }
+  #rt tr.skipped td:first-child { color:var(--err); font-weight:600; } .ctx { color:var(--muted); }
   h3 { margin:2rem 0 .4rem; font-size:1.05rem; }
   ul { padding-left:1.2rem; color:var(--muted); } a { color:var(--accent); }
   @media (max-width:560px) { .demo { grid-template-columns:1fr; } }
@@ -48,10 +51,16 @@
     <div class="row">
       <button id="go" disabled>Convert</button>
       <label class="chk"><input id="fix" type="checkbox" checked> Repair Markdown damage (<code>\\text</code>, <code>\_</code>)</label>
+      <label class="chk"><input id="plain" type="checkbox" checked> Simple values (±0.1 mm) as plain text, not equations</label>
       <label class="chk"><input id="tables" type="checkbox" checked> Turn comma-separated text into tables</label>
     </div>
     <div id="status" role="status"></div>
   </div>
+
+  <details id="report" hidden class="card" style="margin-top:14px">
+    <summary>Report: every item with context <a id="tsv" download="report.tsv" style="margin-left:8px">download .tsv</a></summary>
+    <div style="overflow-x:auto"><table id="rt"><tbody id="tbody"></tbody></table></div>
+  </details>
 
   <div class="demo">
     <div class="card"><h2>Before (text)</h2><code>$$\text{Correction} = X \times (\text{CTE}_{\text{Part}} - \text{CTE}_{\text{Tool}})$$</code></div>
@@ -99,18 +108,35 @@
     go.disabled = true; status.textContent = "Converting…";
     try {
       const buf = await file.arrayBuffer();
-      const r = await DocxMath.convert(buf, { JSZip, temml, DOMParser, XMLSerializer }, { fix: $("fix").checked, tables: $("tables").checked });
+      const r = await DocxMath.convert(buf, { JSZip, temml, DOMParser, XMLSerializer }, { fix: $("fix").checked, tables: $("tables").checked, plain: $("plain").checked });
       const name = file.name.replace(/\.docx$/i, "") + "_math.docx";
       const a = document.createElement("a");
       a.href = URL.createObjectURL(r.blob); a.download = name; document.body.appendChild(a); a.click(); a.remove();
-      status.innerHTML = '<span class="ok">' + r.done + " equations converted</span>" +
+      status.innerHTML = '<span class="ok">' + r.done + " equations</span>" +
+        (r.plain ? ", " + r.plain + " plain-text values" : "") +
         (r.tables ? ", " + r.tables + " table" + (r.tables > 1 ? "s" : "") + " built" : "") +
         (r.skipped ? ', <span class="err">' + r.skipped + " left as text</span>" : "") + ". Saved " + name + ".";
+      showReport(r.items);
     } catch (e) {
       status.innerHTML = '<span class="err">Failed: ' + String(e.message || e).replace(/</g, "&lt;") + "</span>";
     }
     go.disabled = false;
   });
+
+  const esc = (t) => String(t).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  function showReport(items) {
+    const box = $("report");
+    if (!items || !items.length) { box.hidden = true; return; }
+    const order = { skipped: 0, equation: 1, plain: 2 };
+    const rows = items.slice().sort((a, b) => order[a.status] - order[b.status]);
+    const tsv = "status\tlatex\tresult\tbefore\tafter\n" + items.map((i) =>
+      [i.status, i.tex, i.result || "", i.before, i.after].join("\t").replace(/\n/g, " ")).join("\n");
+    $("tsv").href = URL.createObjectURL(new Blob([tsv], { type: "text/tab-separated-values" }));
+    $("tbody").innerHTML = rows.slice(0, 500).map((i) =>
+      '<tr class="' + i.status + '"><td>' + i.status + "</td><td><code>" + esc(i.tex) + "</code>" +
+      (i.result ? " → " + esc(i.result) : "") + '</td><td class="ctx">…' + esc(i.before) + "<b>▮</b>" + esc(i.after) + "…</td></tr>").join("");
+    box.hidden = false; box.open = items.some((i) => i.status === "skipped");
+  }
 })();
 </script>
 </body>

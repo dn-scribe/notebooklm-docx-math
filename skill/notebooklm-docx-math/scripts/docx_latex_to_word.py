@@ -176,6 +176,68 @@ def convert_tables(root):
     return count
 
 
+SUP = {**{str(i): c for i, c in enumerate("⁰¹²³⁴⁵⁶⁷⁸⁹")}, "+": "⁺", "-": "⁻", "−": "⁻"}
+SIMPLE_CMDS = {
+    r"\pm": "±", r"\mp": "∓", r"\times": "×", r"\cdot": "·", r"\ge": "≥", r"\geq": "≥", r"\le": "≤", r"\leq": "≤",
+    r"\approx": "≈", r"\sim": "~", r"\mu": "μ", r"\Delta": "Δ", r"\%": "%", r"\,": "", r"\;": " ", r"\ ": " ", r"\!": "",
+    r"\to": "→", r"\rightarrow": "→", r"\infty": "∞", r"\lt": "<", r"\gt": ">", r"\Omega": "Ω", r"\ll": "≪", r"\gg": "≫", r"\neq": "≠",
+}
+TEXT_CMD = re.compile(r"\\(?:text|textrm|mathrm|textnormal)\s*\{")
+REL = {"<": "<", ">": ">", r"\lt": "<", r"\gt": ">", r"\le": "≤", r"\leq": "≤", r"\ge": "≥", r"\geq": "≥", "≤": "≤", "≥": "≥"}
+
+
+def simple_to_text(tex):
+    """Plain text for 'number + unit' style math (±0.1 mm, 10⁻⁶/K); None if a real equation is needed."""
+    out, i, has = "", 0, False
+    while i < len(tex):
+        ch, m = tex[i], TEXT_CMD.match(tex, i)
+        if m:
+            end = tex.find("}", m.end())
+            if end < 0:
+                return None
+            body = tex[m.end():end]
+            if re.search(r"[\\${}^_]", body):
+                return None
+            out += body
+            has = has or bool(body.strip())
+            i = end + 1
+        elif ch == "\\":
+            m = re.match(r"\\[A-Za-z]+|\\.", tex[i:])
+            rep = SIMPLE_CMDS.get(m.group(0))
+            if rep is None:
+                return None
+            out, has, i = out + rep, True, i + len(m.group(0))
+            if m.group(0)[1:2].isalpha():
+                while tex[i:i + 1] == " ":  # TeX swallows spaces after a control word
+                    i += 1
+        elif ch == "^":
+            if tex[i + 1:i + 2] == "{":
+                end = tex.find("}", i)
+                if end < 0:
+                    return None
+                body, i = tex[i + 2:end], end + 1
+            else:
+                body, i = tex[i + 1:i + 2], i + 2
+            if not re.fullmatch(r"[0-9+\-−]+", body):
+                return None
+            out, has = out + "".join(SUP[c] for c in body), True
+        elif re.match(r"[0-9 .,:;+=<>~%()/\[\]·°'\"–×±]", ch):
+            out, has, i = out + ch, has or bool(ch.strip()), i + 1
+        elif ch == "-":
+            neg = re.search(r"(^|[\s(=<>~])$", out) and re.match(r"[0-9.]", tex[i + 1:i + 2] or "x")
+            out, has, i = out + ("−" if neg else "-"), True, i + 1
+        else:
+            return None
+    out = " ".join(out.split())
+    return out if has and out and len(out) <= 80 else None
+
+
+def split_leading_rel(tex):
+    """LibreOffice shows a leading relation as ¿; move it out into the text."""
+    m = re.match(r"\s*(\\leq?|\\geq?|\\lt|\\gt|<|>|≤|≥)(?![A-Za-z])\s*", tex)
+    return (REL[m.group(1)], tex[m.end():]) if m else ("", tex)
+
+
 def latex_to_omml(exprs):
     """Batch-convert LaTeX strings with one pandoc call. Returns list of oMath
     elements (None where pandoc could not parse the expression)."""
@@ -245,8 +307,8 @@ def collect_matches(root, fix):
     return jobs
 
 
-def rewrite(jobs, omml_iter, fix):
-    done = skipped = 0
+def rewrite(jobs, decisions, omml_iter, report):
+    done = skipped = plain_n = 0
     for p, g, text, ms in jobs:
         # char index -> source run
         owner = []
@@ -258,75 +320,107 @@ def rewrite(jobs, omml_iter, fix):
             p.remove(r)
         out, last = [], 0
         for m in ms:
-            display = bool(m.group("d1") or m.group("d2"))
-            om = next(omml_iter)
+            display, plain, rel, tex0 = next(decisions)
+            item = {"tex": tex0.strip(), "before": text[max(0, m.start() - 30):m.start()],
+                    "after": text[m.end():m.end() + 30]}
             if m.start() > last:
                 out.append(text_run(owner[last], text[last:m.start()]))
-            if om is None:
-                out.append(text_run(owner[m.start()], m.group(0)))
-                skipped += 1
+            if plain is not None:
+                out.append(text_run(owner[m.start()], plain))
+                plain_n += 1
+                item.update(status="plain", result=plain)
             else:
-                om = etree.fromstring(etree.tostring(om))
-                if display and m.start() == 0 and m.end() == len(text):
-                    wrap = etree.Element(f"{{{M}}}oMathPara", nsmap={"m": M})
-                    wrap.append(om)
-                    out.append(wrap)
+                om = next(omml_iter)
+                if om is None:
+                    out.append(text_run(owner[m.start()], m.group(0)))
+                    skipped += 1
+                    item["status"] = "skipped"
                 else:
-                    out.append(om)
-                done += 1
+                    if rel:
+                        out.append(text_run(owner[m.start()], rel + " "))
+                    om = etree.fromstring(etree.tostring(om))
+                    if display and m.start() == 0 and m.end() == len(text):
+                        wrap = etree.Element(f"{{{M}}}oMathPara", nsmap={"m": M})
+                        wrap.append(om)
+                        out.append(wrap)
+                    else:
+                        out.append(om)
+                    done += 1
+                    item["status"] = "equation"
+            report.append(item)
             last = m.end()
         if last < len(text):
             out.append(text_run(owner[last], text[last:]))
         for i, el in enumerate(out):
             p.insert(pos + i, el)
-    return done, skipped
+    return done, skipped, plain_n
 
 
-def convert(src, dst, fix=True, tables=True):
+def convert(src, dst, fix=True, tables=True, plain=True):
+    """Returns dict(done, plain, skipped, tables, items)."""
     if not shutil.which("pandoc"):
         sys.exit("pandoc not found. Install: brew install pandoc | apt install pandoc")
     with zipfile.ZipFile(src) as zin:
         parts = {n: zin.read(n) for n in zin.namelist()}
         infos = {i.filename: i for i in zin.infolist()}
-    trees, all_jobs, exprs, ntables = {}, [], [], 0
+    trees, exprs, decisions, ntables = {}, [], [], 0
     for name in parts:
         if PART_RE.match(name):
             root = etree.fromstring(parts[name])
             ntab = convert_tables(root) if tables else 0
             ntables += ntab
             jobs = collect_matches(root, fix)
-            if ntab and not jobs:
-                trees[name] = (root, [])
-            if jobs:
+            if jobs or ntab:
                 trees[name] = (root, jobs)
-                for _p, _g, _t, ms in jobs:
-                    for m in ms:
-                        tex = next(v for k, v in m.groupdict().items() if v is not None)
-                        exprs.append(normalize_tex(fix_markdown_damage(tex) if fix else tex))
+            for _p, _g, _t, ms in jobs:
+                for m in ms:
+                    d = m.groupdict()
+                    tex0 = next(v for v in d.values() if v is not None)
+                    display = d["d1"] is not None or d["d2"] is not None
+                    tex = normalize_tex(fix_markdown_damage(tex0) if fix else tex0)
+                    pl = simple_to_text(tex) if plain and not display else None
+                    rel, body = ("", tex) if display or pl is not None else split_leading_rel(tex)
+                    decisions.append((display, pl, rel, tex0))
+                    if pl is None:
+                        exprs.append(body)
     omml = iter(latex_to_omml(exprs))
-    done = skipped = 0
+    dec = iter(decisions)
+    res = {"done": 0, "skipped": 0, "plain": 0, "tables": ntables, "items": []}
     for name, (root, jobs) in trees.items():
-        d, s = rewrite(jobs, omml, fix)
-        done += d
-        skipped += s
+        d, s_, pl = rewrite(jobs, dec, omml, res["items"])
+        res["done"] += d
+        res["skipped"] += s_
+        res["plain"] += pl
         parts[name] = etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True)
     with zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED) as zout:
         for name, data in parts.items():
             zout.writestr(infos[name], data)
-    return done, skipped, ntables
+    return res
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("input")
     ap.add_argument("output", nargs="?")
+    ap.add_argument("--no-plain", action="store_true", help="make every expression an equation (default: plain text for simple values like ±0.1 mm)")
     ap.add_argument("--no-tables", action="store_true", help="keep comma-separated text as text")
     ap.add_argument("--no-fix-markdown", action="store_true", help="do not repair \\\\text / \\_ damage")
+    ap.add_argument("--report", metavar="FILE.tsv", help="write every item (status, latex, context) to a TSV")
     a = ap.parse_args()
     src = Path(a.input)
     dst = Path(a.output) if a.output else src.with_name(src.stem + "_math.docx")
-    done, skipped, nt = convert(src, dst, fix=not a.no_fix_markdown, tables=not a.no_tables)
-    print(f"{dst}: {done} equations converted, {skipped} left as text, {nt} tables built")
+    r = convert(src, dst, fix=not a.no_fix_markdown, tables=not a.no_tables, plain=not a.no_plain)
+    print(f"{dst}: {r['done']} equations, {r['plain']} plain-text values, {r['tables']} tables, {r['skipped']} left as text")
+    for it in r["items"]:
+        if it["status"] == "skipped":
+            print(f"  SKIPPED: ...{it['before']}[{it['tex']}]{it['after']}...")
+    if a.report:
+        with open(a.report, "w", encoding="utf-8") as f:
+            f.write("status\tlatex\tresult\tbefore\tafter\n")
+            for it in r["items"]:
+                f.write("\t".join([it["status"], it["tex"], it.get("result", ""), it["before"], it["after"]]).replace("\n", " ") + "\n")
+                
+        print(f"report: {a.report}")
 
 
 if __name__ == "__main__":

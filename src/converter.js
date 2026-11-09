@@ -19,6 +19,53 @@
     return tex.replace(/\^\s*\{\s*\\circ\s*\}|\^\s*\\circ(?![A-Za-z])/g, "\u00B0");
   }
 
+  /* ---- simple values ("±0.1 mm", "10^-6/K", "< 1.0%") -> plain text ---- */
+  const SUP = { 0: "⁰", 1: "¹", 2: "²", 3: "³", 4: "⁴", 5: "⁵", 6: "⁶", 7: "⁷", 8: "⁸", 9: "⁹", "+": "⁺", "-": "⁻", "−": "⁻" };
+  const SIMPLE_CMDS = {
+    "\\pm": "±", "\\mp": "∓", "\\times": "×", "\\cdot": "·", "\\ge": "≥", "\\geq": "≥", "\\le": "≤", "\\leq": "≤",
+    "\\approx": "≈", "\\sim": "~", "\\mu": "μ", "\\Delta": "Δ", "\\%": "%", "\\,": "", "\\;": " ", "\\ ": " ", "\\!": "",
+    "\\to": "→", "\\rightarrow": "→", "\\infty": "∞", "\\lt": "<", "\\gt": ">", "\\Omega": "Ω", "\\ll": "≪", "\\gg": "≫", "\\neq": "≠",
+  };
+  const TEXT_CMD = /^\\(?:text|textrm|mathrm|textnormal)\s*\{/;
+  /* Returns plain text, or null when the expression needs a real equation. */
+  function simpleToText(tex) {
+    let out = "", i = 0, hasContent = false;
+    while (i < tex.length) {
+      const rest = tex.slice(i), ch = tex[i];
+      let m;
+      if ((m = rest.match(TEXT_CMD))) {
+        const end = tex.indexOf("}", i + m[0].length);
+        if (end < 0) return null;
+        const body = tex.slice(i + m[0].length, end);
+        if (/[\\${}^_]/.test(body)) return null;
+        out += body; hasContent = hasContent || /\S/.test(body); i = end + 1;
+      } else if (ch === "\\") {
+        m = rest.match(/^\\[A-Za-z]+|^\\./);
+        const rep = SIMPLE_CMDS[m[0]];
+        if (rep === undefined) return null;
+        out += rep; hasContent = true; i += m[0].length;
+        if (/^\\[A-Za-z]/.test(m[0])) while (tex[i] === " ") i++; // TeX swallows spaces after a control word
+      } else if (ch === "^") {
+        let body;
+        if (tex[i + 1] === "{") { const end = tex.indexOf("}", i); if (end < 0) return null; body = tex.slice(i + 2, end); i = end + 1; }
+        else { body = tex[i + 1] || ""; i += 2; }
+        if (!/^[0-9+\-−]+$/.test(body)) return null;
+        out += Array.from(body, (c) => SUP[c]).join(""); hasContent = true;
+      } else if (/[0-9 .,:;+=<>~%()\/\[\]·°'"–×±]/.test(ch)) { out += ch; hasContent = hasContent || /\S/.test(ch); i++; }
+      else if (ch === "-") { out += /(^|[\s(=<>~])$/.test(out) && /[0-9.]/.test(tex[i + 1] || "") ? "−" : "-"; hasContent = true; i++; }
+      else return null;
+    }
+    out = out.replace(/\s+/g, " ").trim();
+    return hasContent && out && out.length <= 80 ? out : null;
+  }
+
+  const REL = { "<": "<", ">": ">", "\\lt": "<", "\\gt": ">", "\\le": "≤", "\\leq": "≤", "\\ge": "≥", "\\geq": "≥", "≤": "≤", "≥": "≥" };
+  /* LibreOffice shows a leading relation as ¿; move it out into the text. */
+  function splitLeadingRel(tex) {
+    const m = tex.match(/^\s*(\\leq?|\\geq?|\\lt|\\gt|<|>|≤|≥)(?![A-Za-z])\s*/);
+    return m ? [REL[m[1]], tex.slice(m[0].length)] : ["", tex];
+  }
+
   /* Undo Markdown mangling typical of Google-Docs exports of LLM output. */
   function fixMarkdownDamage(tex) {
     tex = tex.replace(/\\\\(?=[A-Za-z%&#])/g, "\\");
@@ -35,6 +82,9 @@
   function run(text, props) {
     return `<m:r>${props ? `<m:rPr>${props}</m:rPr>` : ""}<m:t xml:space="preserve">${esc(text)}</m:t></m:r>`;
   }
+
+  /* no stray (thin/non-breaking) space runs inside sub/superscripts */
+  const ns = (x) => x.replace(/<m:r><m:t xml:space="preserve">[\u00A0\u2009\u200A\u202F ]+<\/m:t><\/m:r>/g, "");
 
   function conv(el) {
     const k = kids(el), n = el.localName;
@@ -56,9 +106,9 @@
       case "mfrac": return wrap("f", wrap("num", c(0)) + wrap("den", c(1)));
       case "msqrt": return wrap("rad", '<m:radPr><m:degHide m:val="1"/></m:radPr><m:deg/>' + wrap("e", seq(el)));
       case "mroot": return wrap("rad", wrap("deg", c(1)) + wrap("e", c(0)));
-      case "msup": return wrap("sSup", wrap("e", c(0)) + wrap("sup", c(1)));
-      case "msub": return wrap("sSub", wrap("e", c(0)) + wrap("sub", c(1)));
-      case "msubsup": return wrap("sSubSup", wrap("e", c(0)) + wrap("sub", c(1)) + wrap("sup", c(2)));
+      case "msup": return wrap("sSup", wrap("e", c(0)) + wrap("sup", ns(c(1))));
+      case "msub": return wrap("sSub", wrap("e", c(0)) + wrap("sub", ns(c(1))));
+      case "msubsup": return wrap("sSubSup", wrap("e", c(0)) + wrap("sub", ns(c(1))) + wrap("sup", ns(c(2))));
       case "mover": {
         const a = k[1] && ACCENTS[k[1].textContent.trim()];
         if (a) return wrap("acc", `<m:accPr><m:chr m:val="${a}"/></m:accPr>` + wrap("e", c(0)));
@@ -232,18 +282,28 @@
         const gr = m.groups;
         const tex0 = gr.d1 ?? gr.d2 ?? gr.i2 ?? gr.i1;
         const display = gr.d1 !== undefined || gr.d2 !== undefined;
-        const omml = latexToOmml(normalizeTex(opts.fix ? fixMarkdownDamage(tex0) : tex0), display, deps);
+        const tex = normalizeTex(opts.fix ? fixMarkdownDamage(tex0) : tex0);
+        const item = { tex: tex0.trim(), before: text.slice(Math.max(0, m.index - 30), m.index), after: text.slice(m.index + m[0].length, m.index + m[0].length + 30) };
         if (m.index > last) out.push(makeRun(doc, owner[last], text.slice(last, m.index)));
-        if (omml === null) {
-          out.push(makeRun(doc, owner[m.index], m[0])); stats.skipped++;
+        const plain = opts.plain && !display ? simpleToText(tex) : null;
+        if (plain !== null) {
+          out.push(makeRun(doc, owner[m.index], plain)); stats.plain++; item.status = "plain"; item.result = plain;
         } else {
-          const whole = display && m.index === 0 && m.index + m[0].length === text.length;
-          const inner = `<m:oMath>${omml}</m:oMath>`;
-          const frag = new deps.DOMParser().parseFromString(
-            `<x xmlns:m="${M}" xmlns:w="${W}">${whole ? `<m:oMathPara>${inner}</m:oMathPara>` : inner}</x>`,
-            "application/xml");
-          out.push(doc.importNode(frag.documentElement.firstChild, true)); stats.done++;
+          const [rel, body] = display ? ["", tex] : splitLeadingRel(tex);
+          const omml = latexToOmml(body, display, deps);
+          if (omml === null) {
+            out.push(makeRun(doc, owner[m.index], m[0])); stats.skipped++; item.status = "skipped";
+          } else {
+            if (rel) out.push(makeRun(doc, owner[m.index], rel + " "));
+            const whole = display && m.index === 0 && m.index + m[0].length === text.length;
+            const inner = `<m:oMath>${omml}</m:oMath>`;
+            const frag = new deps.DOMParser().parseFromString(
+              `<x xmlns:m="${M}" xmlns:w="${W}">${whole ? `<m:oMathPara>${inner}</m:oMathPara>` : inner}</x>`,
+              "application/xml");
+            out.push(doc.importNode(frag.documentElement.firstChild, true)); stats.done++; item.status = "equation";
+          }
         }
+        stats.items.push(item);
         last = m.index + m[0].length;
       }
       if (last < text.length) out.push(makeRun(doc, owner[last], text.slice(last)));
@@ -255,9 +315,9 @@
 
   /* deps: { JSZip, temml, DOMParser, XMLSerializer }; input: ArrayBuffer/Uint8Array */
   async function convert(input, deps, opts = {}) {
-    opts = { fix: true, tables: true, ...opts };
+    opts = { fix: true, tables: true, plain: true, ...opts };
     const zip = await deps.JSZip.loadAsync(input);
-    const stats = { done: 0, skipped: 0, tables: 0 };
+    const stats = { done: 0, skipped: 0, tables: 0, plain: 0, items: [] };
     for (const name of Object.keys(zip.files)) {
       if (!PART_RE.test(name)) continue;
       const out = processPart(await zip.file(name).async("string"), deps, opts, stats);
@@ -271,5 +331,5 @@
     return { blob, ...stats };
   }
 
-  return { convert, fixMarkdownDamage, normalizeTex, splitCsv, latexToOmml };
+  return { convert, fixMarkdownDamage, normalizeTex, splitCsv, simpleToText, splitLeadingRel, latexToOmml };
 });

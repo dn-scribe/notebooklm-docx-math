@@ -7,14 +7,14 @@ Word equations. Three ways to use it:
 | Way | Needs | Where |
 |---|---|---|
 | Web page: one HTML file, JS only, no backend | a browser | `site/index.html` → GitHub Pages |
-| Python script | python3, lxml, pandoc | `scripts/docx_latex_to_word.py` |
-| Claude skill (points users to the web page) | nothing | `skill/notebooklm-docx-math/` |
+| Python script | python3, lxml, pandoc | `skill/notebooklm-docx-math/scripts/docx_latex_to_word.py` |
+| Claude skill (sends users to the page, or runs the script itself) | nothing / the above | `skill/notebooklm-docx-math/` |
 
 ## Script
 
 ```bash
 pip install lxml && brew install pandoc    # or apt install pandoc
-python3 scripts/docx_latex_to_word.py in.docx out.docx
+python3 skill/notebooklm-docx-math/scripts/docx_latex_to_word.py in.docx out.docx --report report.tsv
 ```
 
 ## Skill
@@ -32,7 +32,7 @@ converter are inlined; no CDN, works offline). After editing `src/` or
 `vendor/`, run `python3 build.py` and commit the result. The workflow in
 `.github/workflows/pages.yml` publishes `site/` to GitHub Pages on push to `main`.
 
-Also: `^\circ` becomes `°`, and runs of comma-separated lines (NotebookLM's
+Simple values (`\pm 0.1\text{ mm}` → "±0.1 mm") become plain text; only real math is an equation (`--no-plain` to disable). Also: `^\circ` becomes `°`, and runs of comma-separated lines (NotebookLM's
 table export) become real Word tables (`--no-tables` / checkbox to disable).
 
 ## How it works
